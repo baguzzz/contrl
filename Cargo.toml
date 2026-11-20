@@ -9,4 +9,4 @@ version = "0.1.0"
 edition = "2021" 
 
 [workspace.dependencies] 
-sdl2 = { version = "0.37.0", features = ["bundled", "hidapi"] }
+sdl2 = { version = "0.39.0", features = ["bundled", "hidapi"] }
