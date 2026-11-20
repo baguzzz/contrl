@@ -244,6 +244,7 @@ mod tests {
         // Output getaran harus teredam jauh lebih kecil dari puncak input (0.02)
         assert!(max_jitter_out < 0.005, "max_jitter_out was {}", max_jitter_out);
 
+        let mut last_out = 0.0;
         // Simulasi gerakan menoleh cepat (5.0 rad/s)
         for _ in 0..50 {
             last_out = filter.filter(5.0, dt);
