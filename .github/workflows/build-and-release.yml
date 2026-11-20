@@ -37,7 +37,10 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Install Linux Deps
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y cmake ninja-build libudev-dev libusb-1.0-0-dev pkg-config
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake ninja-build libudev-dev libusb-1.0-0-dev pkg-config \
+            libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev libxkbcommon-dev libgtk-3-dev
       - run: cargo build --release --target ${{ matrix.target }} -p mapper-app
       - uses: actions/upload-artifact@v4
         with:

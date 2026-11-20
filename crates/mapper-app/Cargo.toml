@@ -6,6 +6,7 @@ edition = "2021"
 [dependencies]
 mapper-core = { path = "../mapper-core" }
 glam = "0.29"
+eframe = "0.29"
 sdl3 = { version = "0.14", features = ["build-from-source"] }
 
 [target.'cfg(target_os = "windows")'.dependencies]

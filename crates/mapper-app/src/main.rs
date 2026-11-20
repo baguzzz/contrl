@@ -1,157 +1,175 @@
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
+mod engine;
 mod output;
 
-use glam::{Vec2, Vec3};
-use mapper_core::actions::{
-    ActionBinding, ActionEngine, ActionSet, ActivatorType, GameAction, PhysicalButton,
-};
-use mapper_core::gyro::{GyroConfig, GyroProcessor};
-use mapper_core::{process_stick, StickConfig};
-use output::{create_platform_output, OutputState};
-use sdl3::gamepad::{Axis, Button};
-use sdl3::sensor::SensorType;
-use std::collections::{HashMap, HashSet};
-use std::time::{Duration, Instant};
+use eframe::egui;
+use engine::{spawn_mapper_thread, SharedState};
+use mapper_core::process_stick;
+use std::sync::{Arc, Mutex};
 
-fn map_sdl_button(btn: Button) -> Option<PhysicalButton> {
-    match btn {
-        Button::South => Some(PhysicalButton::South),
-        Button::East => Some(PhysicalButton::East),
-        Button::West => Some(PhysicalButton::West),
-        Button::North => Some(PhysicalButton::North),
-        Button::LeftShoulder => Some(PhysicalButton::LeftBumper),
-        Button::RightShoulder => Some(PhysicalButton::RightBumper),
-        _ => None,
+struct MapperGuiApp {
+    shared: Arc<Mutex<SharedState>>,
+}
+
+impl MapperGuiApp {
+    fn new(shared: Arc<Mutex<SharedState>>) -> Self {
+        Self { shared }
     }
 }
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // 1. Inisialisasi SDL3 dengan dukungan Gamepad & Sensor (Gyro)
-    let sdl = sdl3::init()?;
-    let gamepad_sys = sdl.gamepad()?;
-    let mut event_pump = sdl.event_pump()?;
+impl eframe::App for MapperGuiApp {
+    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // Minta repaint terus menerus agar visualizer stick berjalan mulus 60 FPS
+        ctx.request_repaint();
 
-    // 2. Siapkan konfigurasi DSP & Profil Default
-    let stick_cfg = StickConfig {
-        inner_deadzone: 0.12,
-        outer_deadzone: 0.95,
-        curve_exponent: 1.5,
-    };
+        let mut st = self.shared.lock().unwrap();
 
-    let mut gyro_processor = GyroProcessor::new(GyroConfig {
-        sensitivity_x: 18.0, // Skala ke piksel mouse
-        sensitivity_y: 18.0,
-        min_cutoff: 1.0,
-        beta: 0.03,
-        invert_y: false,
-    });
+        egui::CentralPanel::default().show(ctx, |ui| {
+            ui.heading("Steam-Style Input Mapper");
+            ui.label(format!("Status Perangkat: {}", st.controller_name));
+            ui.separator();
 
-    let default_set = ActionSet {
-        name: "Default".to_string(),
-        bindings: vec![
-            ActionBinding {
-                trigger: PhysicalButton::South,
-                activator: ActivatorType::RegularPress,
-                action: GameAction::Jump,
-            },
-            ActionBinding {
-                trigger: PhysicalButton::West,
-                activator: ActivatorType::LongPress { hold_duration_ms: 400 },
-                action: GameAction::Reload,
-            },
-        ],
-        layers: HashMap::new(),
-    };
-    let mut action_engine = ActionEngine::new(default_set);
+            ui.columns(2, |columns| {
+                // ==========================================
+                // KOLOM KIRI: Pengaturan Analog Stick & Kurva
+                // ==========================================
+                columns.heading("Analog Stick & Response Curve");
+                columns.add_space(6.0);
 
-    // 3. Inisialisasi Output Virtual (ViGEm di Windows)
-    let mut virtual_out = create_platform_output();
+                columns.add(
+                    egui::Slider::new(&mut st.stick_cfg.inner_deadzone, 0.0..=0.45)
+                        .text("Inner Deadzone"),
+                );
+                columns.add(
+                    egui::Slider::new(&mut st.stick_cfg.outer_deadzone, 0.60..=1.0)
+                        .text("Outer Deadzone"),
+                );
+                columns.add(
+                    egui::Slider::new(&mut st.stick_cfg.curve_exponent, 0.5..=3.0)
+                        .text("Kurva Eksponen (1.0 = Linear)"),
+                );
 
-    // State pelacakan kontroler aktif
-    let mut active_gamepad: Option<sdl3::gamepad::Gamepad> = None;
-    let mut pressed_buttons: HashSet<PhysicalButton> = HashSet::new();
-    let mut raw_left_stick = Vec2::ZERO;
-    let mut raw_right_stick = Vec2::ZERO;
-    let mut latest_gyro = Vec3::ZERO;
+                columns.add_space(12.0);
+                columns.label("Grafik Response Curve (Input vs Output):");
 
-    let mut last_tick = Instant::now();
-    let target_frame_time = Duration::from_millis(2); // 500Hz polling loop
+                // Gambar Grafik Kurva Respons secara custom dengan egui Painter
+                let (response, painter) = columns.allocate_painter(
+                    egui::Vec2::new(220.0, 220.0),
+                    egui::Sense::hover(),
+                );
+                let rect = response.rect;
+                painter.rect_filled(rect, 4.0, egui::Color32::from_gray(25));
+                painter.rect_stroke(rect, 4.0, egui::Stroke::new(1.0, egui::Color32::GRAY));
 
-    println!("Menunggu kontroler terhubung... (Tekan Ctrl+C untuk keluar)");
+                // Garis referensi linear (abu-abu tipis)
+                painter.line_segment(
+                    [rect.left_bottom(), rect.right_top()],
+                    egui::Stroke::new(1.0, egui::Color32::from_gray(70)),
+                );
 
-    loop {
-        let now = Instant::now();
-        let dt = now.duration_since(last_tick).as_secs_f32();
-        last_tick = now;
-
-        // 4. Baca semua event hardware dari SDL3
-        for event in event_pump.poll_iter() {
-            use sdl3::event::Event;
-            match event {
-                Event::GamepadAdded { which } => {
-                    if let Ok(mut gp) = gamepad_sys.open(which) {
-                        println!("Kontroler terhubung: {}", gp.name().unwrap_or_default());
-                        // Aktifkan sensor Gyro jika tersedia (DualSense, DualShock 4, Switch Pro)
-                        if gp.has_sensor(SensorType::Gyro) {
-                            let _ = gp.set_sensor_enabled(SensorType::Gyro, true);
-                            println!("Sensor Gyro aktif! Diamkan kontroler 1 detik untuk kalibrasi...");
-                            gyro_processor.calibrator.reset();
-                        }
-                        active_gamepad = Some(gp);
-                    }
+                // Gambar titik-titik kurva berdasarkan konfigurasi saat ini
+                let steps = 50;
+                let mut points = Vec::with_capacity(steps + 1);
+                for i in 0..=steps {
+                    let input_x = (i as f32) / (steps as f32);
+                    let out = process_stick(input_x, 0.0, &st.stick_cfg).x;
+                    let px = rect.left() + input_x * rect.width();
+                    let py = rect.bottom() - out * rect.height();
+                    points.push(egui::Pos2::new(px, py));
                 }
-                Event::GamepadButtonDown { button, .. } => {
-                    if let Some(pb) = map_sdl_button(button) {
-                        pressed_buttons.insert(pb);
-                    }
-                }
-                Event::GamepadButtonUp { button, .. } => {
-                    if let Some(pb) = map_sdl_button(button) {
-                        pressed_buttons.remove(&pb);
-                    }
-                }
-                Event::GamepadAxisMotion { axis, value, .. } => {
-                    let norm = (value as f32) / 32768.0;
-                    match axis {
-                        Axis::LeftX => raw_left_stick.x = norm,
-                        Axis::LeftY => raw_left_stick.y = -norm, // Invert Y agar atas = +1.0
-                        Axis::RightX => raw_right_stick.x = norm,
-                        Axis::RightY => raw_right_stick.y = -norm,
-                        _ => {}
-                    }
-                }
-                Event::GamepadSensorUpdate { sensor, data, .. } => {
-                    if sensor == SensorType::Gyro && data.len() >= 3 {
-                        latest_gyro = Vec3::new(data[0], data[1], data[2]);
-                    }
-                }
-                Event::Quit { .. } => return Ok(()),
-                _ => {}
-            }
-        }
+                painter.add(egui::Shape::line(
+                    points,
+                    egui::Stroke::new(2.5, egui::Color32::from_rgb(0, 190, 255)),
+                ));
 
-        // 5. Jalankan Pipeline Pemrosesan (jika kontroler terpasang)
-        if active_gamepad.is_some() {
-            let processed_l = process_stick(raw_left_stick.x, raw_left_stick.y, &stick_cfg);
-            let processed_r = process_stick(raw_right_stick.x, raw_right_stick.y, &stick_cfg);
-            let gyro_delta = gyro_processor.process(latest_gyro, dt);
-            let triggered_actions: HashSet<GameAction> = action_engine
-                .update(&pressed_buttons, now)
-                .into_iter()
-                .collect();
+                // ==========================================
+                // KOLOM KANAN: Pengaturan Gyro & Visualizer
+                // ==========================================
+                columns[1].heading("Gyro & Motion Control (1€ Filter)");
+                columns[1].add_space(6.0);
 
-            // 6. Kirim hasil akhir ke kontroler virtual & mouse
-            virtual_out.send(&OutputState {
-                left_stick: processed_l,
-                right_stick: processed_r,
-                gyro_mouse_delta: gyro_delta,
-                actions: triggered_actions,
+                let cal_status = if st.gyro_calibrated {
+                    "Terkalibrasi (Siap)"
+                } else {
+                    "Mengkalibrasi (Diamkan kontroler...)"
+                };
+                columns[1].label(format!("Status Gyro: {}", cal_status));
+                if columns[1].button("Kalibrasi Ulang Gyro").clicked() {
+                    st.recalibrate_gyro = true;
+                }
+
+                columns[1].add_space(6.0);
+                columns[1].add(
+                    egui::Slider::new(&mut st.gyro_cfg.sensitivity_x, 1.0..=50.0)
+                        .text("Sensitivitas X"),
+                );
+                columns[1].add(
+                    egui::Slider::new(&mut st.gyro_cfg.sensitivity_y, 1.0..=50.0)
+                        .text("Sensitivitas Y"),
+                );
+                columns[1].add(
+                    egui::Slider::new(&mut st.gyro_cfg.min_cutoff, 0.1..=3.0)
+                        .text("Smoothing (Min Cutoff)"),
+                );
+                columns[1].add(
+                    egui::Slider::new(&mut st.gyro_cfg.beta, 0.0..=0.15)
+                        .text("Kecepatan (Beta)"),
+                );
+                columns[1].checkbox(&mut st.gyro_cfg.invert_y, "Invert Sumbu Y");
+
+                columns[1].add_space(12.0);
+                columns[1].label("Live Stick Visualizer (Merah = Raw, Hijau = Output):");
+
+                // Visualizer lingkaran Left Stick
+                let (stick_resp, stick_painter) = columns[1].allocate_painter(
+                    egui::Vec2::new(150.0, 150.0),
+                    egui::Sense::hover(),
+                );
+                let s_rect = stick_resp.rect;
+                let center = s_rect.center();
+                let radius = s_rect.width() * 0.45;
+
+                // Lingkaran batas luar & lingkaran area deadzone
+                stick_painter.circle_stroke(
+                    center,
+                    radius,
+                    egui::Stroke::new(1.5, egui::Color32::GRAY),
+                );
+                stick_painter.circle_stroke(
+                    center,
+                    radius * st.stick_cfg.inner_deadzone,
+                    egui::Stroke::new(1.0, egui::Color32::from_rgb(255, 100, 100)),
+                );
+
+                // Titik Raw Input (Merah)
+                let raw_pos = center
+                    + egui::Vec2::new(st.raw_left.x * radius, -st.raw_left.y * radius);
+                stick_painter.circle_filled(raw_pos, 4.0, egui::Color32::RED);
+
+                // Titik Processed Output (Hijau)
+                let proc_pos = center
+                    + egui::Vec2::new(st.processed_left.x * radius, -st.processed_left.y * radius);
+                stick_painter.circle_filled(proc_pos, 5.0, egui::Color32::GREEN);
             });
-        }
-
-        // Jaga agar loop berjalan stabil di ~500Hz tanpa memakan 100% CPU
-        let elapsed = now.elapsed();
-        if elapsed < target_frame_time {
-            std::thread::sleep(target_frame_time - elapsed);
-        }
+        });
     }
+}
+
+fn main() -> eframe::Result<()> {
+    let shared_state = Arc::new(Mutex::new(SharedState::default()));
+
+    // Jalankan engine input 500Hz di background thread
+    spawn_mapper_thread(Arc::clone(&shared_state));
+
+    let options = eframe::NativeOptions {
+        viewport: egui::ViewportBuilder::default().with_inner_size([680.0, 440.0]),
+        ..Default::default()
+    };
+
+    eframe::run_native(
+        "Rust Input Mapper",
+        options,
+        Box::new(|_cc| Ok(Box::new(MapperGuiApp::new(shared_state)))),
+    )
 }
