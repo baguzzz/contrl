@@ -15,6 +15,9 @@ pub struct SharedState {
     pub stick_cfg: StickConfig,
     pub gyro_cfg: GyroConfig,
     pub recalibrate_gyro: bool,
+    // Daftar pemetaan tombol yang bisa diedit langsung lewat UI
+    pub bindings: Vec<ActionBinding>,
+    pub bindings_dirty: bool,
     // Telemetri untuk ditampilkan di UI
     pub controller_name: String,
     pub raw_left: Vec2,
@@ -38,6 +41,21 @@ impl Default for SharedState {
                 invert_y: false,
             },
             recalibrate_gyro: false,
+            bindings: vec![
+                ActionBinding {
+                    trigger: PhysicalButton::South,
+                    activator: ActivatorType::RegularPress,
+                    action: GameAction::Jump,
+                },
+                ActionBinding {
+                    trigger: PhysicalButton::West,
+                    activator: ActivatorType::LongPress {
+                        hold_duration_ms: 400,
+                    },
+                    action: GameAction::Reload,
+                },
+            ],
+            bindings_dirty: false,
             controller_name: "Menunggu kontroler...".to_string(),
             raw_left: Vec2::ZERO,
             processed_left: Vec2::ZERO,
@@ -70,23 +88,16 @@ pub fn spawn_mapper_thread(shared: Arc<Mutex<SharedState>>) {
         let gamepad_sys = sdl.gamepad().unwrap();
         let mut event_pump = sdl.event_pump().unwrap();
 
-        let initial_gyro_cfg = shared.lock().unwrap().gyro_cfg;
+        let (initial_gyro_cfg, initial_bindings) = {
+            let st = shared.lock().unwrap();
+            (st.gyro_cfg, st.bindings.clone())
+        };
+
         let mut gyro_processor = GyroProcessor::new(initial_gyro_cfg);
 
         let default_set = ActionSet {
             name: "Default".to_string(),
-            bindings: vec![
-                ActionBinding {
-                    trigger: PhysicalButton::South,
-                    activator: ActivatorType::RegularPress,
-                    action: GameAction::Jump,
-                },
-                ActionBinding {
-                    trigger: PhysicalButton::West,
-                    activator: ActivatorType::LongPress { hold_duration_ms: 400 },
-                    action: GameAction::Reload,
-                },
-            ],
+            bindings: initial_bindings,
             layers: HashMap::new(),
         };
         let mut action_engine = ActionEngine::new(default_set);
@@ -157,18 +168,33 @@ pub fn spawn_mapper_thread(shared: Arc<Mutex<SharedState>>) {
                 }
             }
 
-            // Ambil konfigurasi terbaru dari GUI
-            let (stick_cfg, gyro_cfg, need_recal) = {
+            // Ambil konfigurasi & perubahan binding terbaru dari GUI
+            let (stick_cfg, gyro_cfg, need_recal, updated_bindings) = {
                 let mut st = shared.lock().unwrap();
                 let recal = st.recalibrate_gyro;
                 st.recalibrate_gyro = false;
-                (st.stick_cfg, st.gyro_cfg, recal)
+
+                let new_binds = if st.bindings_dirty {
+                    st.bindings_dirty = false;
+                    Some(st.bindings.clone())
+                } else {
+                    None
+                };
+
+                (st.stick_cfg, st.gyro_cfg, recal, new_binds)
             };
 
             if need_recal {
                 gyro_processor.calibrator.reset();
             }
             gyro_processor.config = gyro_cfg;
+
+            // Terapkan pemetaan tombol baru jika diedit user di UI
+            if let Some(binds) = updated_bindings {
+                if let Some(set) = action_engine.sets.get_mut(&action_engine.active_set) {
+                    set.bindings = binds;
+                }
+            }
 
             if active_gamepad.is_some() {
                 let processed_l = process_stick(raw_left_stick.x, raw_left_stick.y, &stick_cfg);
@@ -186,7 +212,6 @@ pub fn spawn_mapper_thread(shared: Arc<Mutex<SharedState>>) {
                     actions: triggered_actions,
                 });
 
-                // Kirim data telemetri balik ke GUI
                 if let Ok(mut st) = shared.lock() {
                     st.raw_left = raw_left_stick;
                     st.processed_left = processed_l;
