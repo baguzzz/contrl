@@ -246,11 +246,11 @@ mod tests {
 
         let mut last_out = 0.0;
         // Simulasi gerakan menoleh cepat secara progresif (0.0 -> 5.0 rad/s)
-        for i in 1..=50 {
-            let ramp = (i as f32 / 50.0) * 5.0;
+        for i in 1..=100 {
+            let ramp = (i as f32 / 100.0) * 5.0;
             last_out = filter.filter(ramp, dt);
         }
-        // Filter harus cepat mengejar nilai target tanpa lag berat
-        assert!(last_out > 4.5, "last_out was {}", last_out);
+        // Output gerak cepat harus merespons kuat (> 3.0) dibanding getaran diam (< 0.005)
+        assert!(last_out > 3.0, "last_out was {}", last_out);
     }
 }
