@@ -8,7 +8,6 @@ use eframe::egui;
 use engine::{spawn_mapper_thread, SharedState};
 use mapper_core::actions::{ActionBinding, ActivatorType, GameAction, PhysicalButton};
 use mapper_core::process_stick;
-use profiles::GameProfile;
 use std::sync::{Arc, Mutex};
 
 const ALL_BUTTONS: [PhysicalButton; 8] = [
@@ -99,9 +98,11 @@ impl MapperGuiApp {
 impl eframe::App for MapperGuiApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         ctx.request_repaint();
-        let mut st = self.shared.lock().unwrap();
+        let shared = Arc::clone(&self.shared);
 
         egui::CentralPanel::default().show(ctx, |ui| {
+            let mut st = shared.lock().unwrap();
+
             // Header Status
             ui.horizontal(|ui| {
                 ui.heading("Steam-Style Input Mapper");
@@ -180,7 +181,10 @@ impl eframe::App for MapperGuiApp {
                 ui.horizontal(|ui| {
                     ui.small(format!("Jendela Fokus: {}", st.active_window_title));
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        ui.small(egui::RichText::new(&st.status_message).color(egui::Color32::LIGHT_GREEN));
+                        ui.small(
+                            egui::RichText::new(&st.status_message)
+                                .color(egui::Color32::LIGHT_GREEN),
+                        );
                     });
                 });
             });
@@ -221,83 +225,80 @@ impl MapperGuiApp {
             let prof = st.store.active_profile_mut();
 
             ui.columns(2, |columns| {
-                // KOLOM KIRI: Analog Stick & Kurva
-                columns.heading("Analog Stick & Response Curve");
-                columns.add_space(6.0);
+                // KOLOM KIRI (columns[0]): Analog Stick & Kurva
+                columns[0].heading("Analog Stick & Response Curve");
+                columns[0].add_space(6.0);
 
-                columns.add(
+                columns[0].add(
                     egui::Slider::new(&mut prof.stick_cfg.inner_deadzone, 0.0..=0.45)
                         .text("Inner Deadzone"),
                 );
-                columns.add(
+                columns[0].add(
                     egui::Slider::new(&mut prof.stick_cfg.outer_deadzone, 0.60..=1.0)
                         .text("Outer Deadzone"),
                 );
-                columns.add(
+                columns[0].add(
                     egui::Slider::new(&mut prof.stick_cfg.curve_exponent, 0.5..=3.0)
                         .text("Kurva Eksponen (1.0 = Linear)"),
                 );
 
-                columns.add_space(12.0);
-                columns.label("Grafik Response Curve (Input vs Output):");
-
-                let (response, painter) =
-                    columns.allocate_painter(egui::Vec2::new(210.0, 210.0), egui::Sense::hover());
-                let rect = response.rect;
-                painter.rect_filled(rect, 4.0, egui::Color32::from_gray(25));
-                painter.rect_stroke(rect, 4.0, egui::Stroke::new(1.0, egui::Color32::GRAY));
-
-                painter.line_segment(
-                    [rect.left_bottom(), rect.right_top()],
-                    egui::Stroke::new(1.0, egui::Color32::from_gray(70)),
-                );
-
-                let steps = 50;
-                let mut points = Vec::with_capacity(steps + 1);
-                for i in 0..=steps {
-                    let input_x = (i as f32) / (steps as f32);
-                    let out = process_stick(input_x, 0.0, &prof.stick_cfg).x;
-                    let px = rect.left() + input_x * rect.width();
-                    let py = rect.bottom() - out * rect.height();
+                columns[0].add_space(12.0);
+columns[0].label("Grafik Response Curve (Input vs Output):");
+let (response, painter) = columns[0]
+.allocate_painter(egui::Vec2::new(210.0, 210.0), egui::Sense::hover());
+let rect = response.rect;
+painter.rect_filled(rect, 4.0, egui::Color32::from_gray(25));
+painter.rect_stroke(rect, 4.0, egui::Stroke::new(1.0, egui::Color32::GRAY));
+painter.line_segment(
+[rect.left_bottom(), rect.right_top()],
+egui::Stroke::new(1.0, egui::Color32::from_gray(70)),
+);
+let steps = 50;
+let mut points = Vec::with_capacity(steps + 1);
+for i in 0..=steps {
+let input_x = (i as f32) / (steps as f32);
+let out = process_stick(input_x, 0.0, &prof.stick_cfg).x;
+let px = rect.left() + input_x * rect.width();
+let py = rect.bottom() - out * rect.height();
 points.push(egui::Pos2::new(px, py));
 }
 painter.add(egui::Shape::line(
 points,
 egui::Stroke::new(2.5, egui::Color32::from_rgb(0, 190, 255)),
 ));
-// KOLOM KANAN: Gyro & Visualizer
-columns.heading("Gyro & Motion Control (1€ Filter)");
-columns.add_space(6.0);
+// KOLOM KANAN (columns[1]): Gyro & Visualizer
+columns[1].heading("Gyro & Motion Control (1€ Filter)");
+columns[1].add_space(6.0);
 let cal_status = if gyro_calibrated {
 "Terkalibrasi (Siap)"
 } else {
 "Mengkalibrasi (Diamkan kontroler...)"
 };
-columns.label(format!("Status Gyro: {}", cal_status));
-if columns.button("Kalibrasi Ulang Gyro").clicked() {
+columns[1].label(format!("Status Gyro: {}", cal_status));
+if columns[1].button("Kalibrasi Ulang Gyro").clicked() {
 trigger_recal = true;
 }
-columns.add_space(6.0);
-columns.add(
+columns[1].add_space(6.0);
+columns[1].add(
 egui::Slider::new(&mut prof.gyro_cfg.sensitivity_x, 1.0..=50.0)
 .text("Sensitivitas X"),
 );
-columns.add(
+columns[1].add(
 egui::Slider::new(&mut prof.gyro_cfg.sensitivity_y, 1.0..=50.0)
 .text("Sensitivitas Y"),
 );
-columns.add(
+columns[1].add(
 egui::Slider::new(&mut prof.gyro_cfg.min_cutoff, 0.1..=3.0)
 .text("Smoothing (Min Cutoff)"),
 );
-columns.add(
+columns[1].add(
 egui::Slider::new(&mut prof.gyro_cfg.beta, 0.0..=0.15).text("Kecepatan (Beta)"),
 );
-columns.checkbox(&mut prof.gyro_cfg.invert_y, "Invert Sumbu Y");
-columns.add_space(12.0);
-columns.label("Live Stick Visualizer (Merah = Raw, Hijau = Output):");
-let (stick_resp, stick_painter) =
-columns.allocate_painter(egui::Vec2::new(140.0, 140.0), egui::Sense::hover());
+columns[1].checkbox(&mut prof.gyro_cfg.invert_y, "Invert Sumbu Y");
+columns[1].add_space(12.0);
+columns[1].label("Live Stick Visualizer (Merah = Raw, Hijau = Output):");
+let (stick_resp, stick_painter) = columns[1]
+.allocate_painter(egui::Vec2::new(140.0, 140.0), egui::Sense::hover());
 let s_rect = stick_resp.rect;
 let center = s_rect.center();
 let radius = s_rect.width() * 0.45;
@@ -326,7 +327,7 @@ st.recalibrate_gyro = true;
 fn render_button_bindings(&mut self, ui: &mut egui::Ui, st: &mut SharedState) {
 ui.heading("Tambah Pemetaan Baru");
 ui.add_space(4.0);
-let mut added_binding: Option = None;
+let mut added_binding: Option<ActionBinding> = None;
 ui.group(|ui| {
 ui.horizontal(|ui| {
 ui.label("Tombol Fisik:");
@@ -427,7 +428,7 @@ st.bindings_dirty = true;
 ui.add_space(12.0);
 ui.heading("Daftar Pemetaan Aktif");
 ui.add_space(4.0);
-let mut index_to_remove: Option = None;
+let mut index_to_remove: Option<usize> = None;
 egui::ScrollArea::vertical().show(ui, |ui| {
 let bindings = &st.store.active_profile().bindings;
 for (idx, binding) in bindings.iter().enumerate() {

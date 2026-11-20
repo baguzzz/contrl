@@ -180,7 +180,7 @@ pub fn spawn_mapper_thread(shared: Arc<Mutex<SharedState>>) {
                     }
                     Event::ControllerSensorUpdated { sensor, data, .. } => {
                         if sensor == SensorType::Gyroscope {
-                            latest_gyro = Vec3::new(data, data, data);
+                            latest_gyro = Vec3::new(data[0], data[1], data[2]);
                         }
                     }
                     _ => {}
