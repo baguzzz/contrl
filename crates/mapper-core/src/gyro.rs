@@ -231,14 +231,18 @@ mod tests {
         let mut filter = OneEuroFilter1D::new(1.0, 0.05);
         let dt = 0.002; // 500Hz
 
-        // Simulasi getaran tangan halus di sekitar nilai 0.0
-        let jitter_inputs = [0.02, -0.02, 0.015, -0.015, 0.01];
-        let mut last_out = 0.0;
-        for &val in &jitter_inputs {
-            last_out = filter.filter(val, dt);
+        // Inisialisasi titik diam awal di 0.0
+        filter.filter(0.0, dt);
+
+        // Simulasi 30 frame getaran tangan frekuensi tinggi (+/- 0.02 rad/s)
+        let mut max_jitter_out: f32 = 0.0;
+        for i in 0..30 {
+            let val = if i % 2 == 0 { 0.02 } else { -0.02 };
+            let out = filter.filter(val, dt);
+            max_jitter_out = max_jitter_out.max(out.abs());
         }
-        // Output harus teredam jauh lebih kecil dari puncak getaran (0.02)
-        assert!(last_out.abs() < 0.005);
+        // Output getaran harus teredam jauh lebih kecil dari puncak input (0.02)
+        assert!(max_jitter_out < 0.005, "max_jitter_out was {}", max_jitter_out);
 
         // Simulasi gerakan menoleh cepat (5.0 rad/s)
         for _ in 0..50 {
