@@ -1,1 +1,5 @@
-[workspace] members = ["crates/\*"] resolver = "2" [workspace.dependencies] sdl2 = { version = "0.37.0", features = ["bundled", "hidapi"] }
+[workspace] 
+members = ["crates/\*"] resolver = "2" 
+[workspace.dependencies] 
+sdl2 = { version = "0.37.0", 
+features = ["bundled", "hidapi"] }
