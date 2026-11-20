@@ -7,6 +7,9 @@ edition = "2021"
 mapper-core = { path = "../mapper-core" }
 glam = "0.29"
 eframe = "0.29"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+active-win-pos-rs = "0.8"
 sdl3 = { version = "0.14", features = ["build-from-source"] }
 
 [target.'cfg(target_os = "windows")'.dependencies]

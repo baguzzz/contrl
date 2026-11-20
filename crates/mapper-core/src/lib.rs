@@ -2,7 +2,7 @@ pub mod actions;
 pub mod gyro;
 use glam::Vec2;
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, serde::Serialize, serde::Deserialize)]
 pub struct StickConfig {
     pub inner_deadzone: f32,
     pub outer_deadzone: f32,

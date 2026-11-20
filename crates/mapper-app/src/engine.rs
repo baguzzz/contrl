@@ -1,10 +1,9 @@
 use crate::output::{create_platform_output, OutputState};
+use crate::profiles::ProfileStore;
 use glam::{Vec2, Vec3};
-use mapper_core::actions::{
-    ActionBinding, ActionEngine, ActionSet, ActivatorType, GameAction, PhysicalButton,
-};
-use mapper_core::gyro::{GyroConfig, GyroProcessor};
-use mapper_core::{process_stick, StickConfig};
+use mapper_core::actions::{ActionEngine, ActionSet};
+use mapper_core::gyro::GyroProcessor;
+use mapper_core::process_stick;
 use sdl3::gamepad::{Axis, Button};
 use sdl3::sensor::SensorType;
 use std::collections::{HashMap, HashSet};
@@ -12,13 +11,13 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 pub struct SharedState {
-    pub stick_cfg: StickConfig,
-    pub gyro_cfg: GyroConfig,
+    pub store: ProfileStore,
+    pub auto_switch_enabled: bool,
+    pub active_window_title: String,
     pub recalibrate_gyro: bool,
-    // Daftar pemetaan tombol yang bisa diedit langsung lewat UI
-    pub bindings: Vec<ActionBinding>,
     pub bindings_dirty: bool,
-    // Telemetri untuk ditampilkan di UI
+    pub status_message: String,
+    // Telemetri
     pub controller_name: String,
     pub raw_left: Vec2,
     pub processed_left: Vec2,
@@ -27,35 +26,14 @@ pub struct SharedState {
 
 impl Default for SharedState {
     fn default() -> Self {
+        let store = ProfileStore::load_or_default();
         Self {
-            stick_cfg: StickConfig {
-                inner_deadzone: 0.12,
-                outer_deadzone: 0.95,
-                curve_exponent: 1.5,
-            },
-            gyro_cfg: GyroConfig {
-                sensitivity_x: 18.0,
-                sensitivity_y: 18.0,
-                min_cutoff: 1.0,
-                beta: 0.03,
-                invert_y: false,
-            },
+            store,
+            auto_switch_enabled: true,
+            active_window_title: "-".to_string(),
             recalibrate_gyro: false,
-            bindings: vec![
-                ActionBinding {
-                    trigger: PhysicalButton::South,
-                    activator: ActivatorType::RegularPress,
-                    action: GameAction::Jump,
-                },
-                ActionBinding {
-                    trigger: PhysicalButton::West,
-                    activator: ActivatorType::LongPress {
-                        hold_duration_ms: 400,
-                    },
-                    action: GameAction::Reload,
-                },
-            ],
             bindings_dirty: false,
+            status_message: "Profil dimuat dari profiles.json".to_string(),
             controller_name: "Menunggu kontroler...".to_string(),
             raw_left: Vec2::ZERO,
             processed_left: Vec2::ZERO,
@@ -64,7 +42,8 @@ impl Default for SharedState {
     }
 }
 
-fn map_sdl_button(btn: Button) -> Option<PhysicalButton> {
+fn map_sdl_button(btn: Button) -> Option<mapper_core::actions::PhysicalButton> {
+    use mapper_core::actions::PhysicalButton;
     match btn {
         Button::South => Some(PhysicalButton::South),
         Button::East => Some(PhysicalButton::East),
@@ -77,6 +56,43 @@ fn map_sdl_button(btn: Button) -> Option<PhysicalButton> {
 }
 
 pub fn spawn_mapper_thread(shared: Arc<Mutex<SharedState>>) {
+    // Thread 1: Context Watcher (Auto-Switch Profil per Game setiap 300ms)
+    let shared_watcher = Arc::clone(&shared);
+    std::thread::spawn(move || loop {
+        std::thread::sleep(Duration::from_millis(300));
+
+        if let Ok(win) = active_win_pos_rs::get_active_window() {
+            let info = format!("{} | {}", win.app_name, win.title).to_lowercase();
+
+            if let Ok(mut st) = shared_watcher.lock() {
+                st.active_window_title = format!("{} ({})", win.app_name, win.title);
+
+                if st.auto_switch_enabled {
+                    // Cari profil dengan window_keyword yang cocok
+                    let matched_name = st
+                        .store
+                        .profiles
+                        .values()
+                        .find(|p| {
+                            !p.window_keyword.trim().is_empty()
+                                && info.contains(&p.window_keyword.trim().to_lowercase())
+                        })
+                        .map(|p| p.name.clone())
+                        .unwrap_or_else(|| "Default".to_string());
+
+                    if st.store.active_profile_name != matched_name
+                        && st.store.profiles.contains_key(&matched_name)
+                    {
+                        st.store.active_profile_name = matched_name.clone();
+                        st.bindings_dirty = true;
+                        st.status_message = format!("Auto-Switch ke profil: {}", matched_name);
+                    }
+                }
+            }
+        }
+    });
+
+    // Thread 2: Polling Loop Kontroler 500Hz
     std::thread::spawn(move || {
         let sdl = match sdl3::init() {
             Ok(s) => s,
@@ -90,13 +106,14 @@ pub fn spawn_mapper_thread(shared: Arc<Mutex<SharedState>>) {
 
         let (initial_gyro_cfg, initial_bindings) = {
             let st = shared.lock().unwrap();
-            (st.gyro_cfg, st.bindings.clone())
+            let prof = st.store.active_profile();
+            (prof.gyro_cfg, prof.bindings.clone())
         };
 
         let mut gyro_processor = GyroProcessor::new(initial_gyro_cfg);
 
         let default_set = ActionSet {
-            name: "Default".to_string(),
+            name: "ActiveSet".to_string(),
             bindings: initial_bindings,
             layers: HashMap::new(),
         };
@@ -104,13 +121,13 @@ pub fn spawn_mapper_thread(shared: Arc<Mutex<SharedState>>) {
         let mut virtual_out = create_platform_output();
 
         let mut active_gamepad: Option<sdl3::gamepad::Gamepad> = None;
-        let mut pressed_buttons: HashSet<PhysicalButton> = HashSet::new();
+        let mut pressed_buttons = HashSet::new();
         let mut raw_left_stick = Vec2::ZERO;
         let mut raw_right_stick = Vec2::ZERO;
         let mut latest_gyro = Vec3::ZERO;
 
         let mut last_tick = Instant::now();
-        let target_frame_time = Duration::from_millis(2); // 500Hz
+        let target_frame_time = Duration::from_millis(2);
 
         loop {
             let now = Instant::now();
@@ -168,20 +185,22 @@ pub fn spawn_mapper_thread(shared: Arc<Mutex<SharedState>>) {
                 }
             }
 
-            // Ambil konfigurasi & perubahan binding terbaru dari GUI
             let (stick_cfg, gyro_cfg, need_recal, updated_bindings) = {
                 let mut st = shared.lock().unwrap();
                 let recal = st.recalibrate_gyro;
                 st.recalibrate_gyro = false;
 
-                let new_binds = if st.bindings_dirty {
-                    st.bindings_dirty = false;
-                    Some(st.bindings.clone())
+                let dirty = st.bindings_dirty;
+                st.bindings_dirty = false;
+
+                let prof = st.store.active_profile();
+                let new_binds = if dirty {
+                    Some(prof.bindings.clone())
                 } else {
                     None
                 };
 
-                (st.stick_cfg, st.gyro_cfg, recal, new_binds)
+                (prof.stick_cfg, prof.gyro_cfg, recal, new_binds)
             };
 
             if need_recal {
@@ -189,7 +208,6 @@ pub fn spawn_mapper_thread(shared: Arc<Mutex<SharedState>>) {
             }
             gyro_processor.config = gyro_cfg;
 
-            // Terapkan pemetaan tombol baru jika diedit user di UI
             if let Some(binds) = updated_bindings {
                 if let Some(set) = action_engine.sets.get_mut(&action_engine.active_set) {
                     set.bindings = binds;
@@ -200,7 +218,7 @@ pub fn spawn_mapper_thread(shared: Arc<Mutex<SharedState>>) {
                 let processed_l = process_stick(raw_left_stick.x, raw_left_stick.y, &stick_cfg);
                 let processed_r = process_stick(raw_right_stick.x, raw_right_stick.y, &stick_cfg);
                 let gyro_delta = gyro_processor.process(latest_gyro, dt);
-                let triggered_actions: HashSet<GameAction> = action_engine
+                let triggered_actions = action_engine
                     .update(&pressed_buttons, now)
                     .into_iter()
                     .collect();

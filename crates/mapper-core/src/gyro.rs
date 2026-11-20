@@ -127,7 +127,7 @@ impl GyroCalibrator {
 }
 
 /// Konfigurasi lengkap Gyro-to-Mouse ala Steam Input
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, serde::Serialize, serde::Deserialize)]
 pub struct GyroConfig {
     pub sensitivity_x: f32,
     pub sensitivity_y: f32,

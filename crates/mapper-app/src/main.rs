@@ -2,11 +2,13 @@
 
 mod engine;
 mod output;
+mod profiles;
 
 use eframe::egui;
 use engine::{spawn_mapper_thread, SharedState};
 use mapper_core::actions::{ActionBinding, ActivatorType, GameAction, PhysicalButton};
 use mapper_core::process_stick;
+use profiles::GameProfile;
 use std::sync::{Arc, Mutex};
 
 const ALL_BUTTONS: [PhysicalButton; 8] = [
@@ -71,7 +73,7 @@ enum ActivatorKind {
 struct MapperGuiApp {
     shared: Arc<Mutex<SharedState>>,
     active_tab: UiTab,
-    // State formulir untuk menambah pemetaan baru
+    new_profile_name: String,
     new_trigger: PhysicalButton,
     new_activator_kind: ActivatorKind,
     new_duration_ms: u64,
@@ -84,6 +86,7 @@ impl MapperGuiApp {
         Self {
             shared,
             active_tab: UiTab::StickAndGyro,
+            new_profile_name: String::new(),
             new_trigger: PhysicalButton::North,
             new_activator_kind: ActivatorKind::Regular,
             new_duration_ms: 400,
@@ -99,6 +102,7 @@ impl eframe::App for MapperGuiApp {
         let mut st = self.shared.lock().unwrap();
 
         egui::CentralPanel::default().show(ctx, |ui| {
+            // Header Status
             ui.horizontal(|ui| {
                 ui.heading("Steam-Style Input Mapper");
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -106,6 +110,82 @@ impl eframe::App for MapperGuiApp {
                 });
             });
             ui.separator();
+
+            // Bar Manajemen Profil & Auto-Switch
+            ui.group(|ui| {
+                ui.horizontal(|ui| {
+                    ui.label("Profil Aktif:");
+                    let mut profile_names: Vec<String> = st.store.profiles.keys().cloned().collect();
+                    profile_names.sort();
+
+                    let current_name = st.store.active_profile_name.clone();
+                    egui::ComboBox::from_id_salt("combo_profile")
+                        .selected_text(&current_name)
+                        .show_ui(ui, |ui| {
+                            for name in profile_names {
+                                if ui
+                                    .selectable_value(
+                                        &mut st.store.active_profile_name,
+                                        name.clone(),
+                                        &name,
+                                    )
+                                    .clicked()
+                                {
+                                    st.bindings_dirty = true;
+                                    st.status_message = format!("Berpindah ke profil: {}", name);
+                                }
+                            }
+                        });
+
+                    if ui.button("💾 Simpan JSON").clicked() {
+                        match st.store.save() {
+                            Ok(_) => st.status_message = "Tersimpan ke profiles.json!".to_string(),
+                            Err(e) => st.status_message = format!("Gagal simpan: {}", e),
+                        }
+                    }
+
+                    ui.checkbox(&mut st.auto_switch_enabled, "Auto-Switch Game");
+                });
+
+                ui.horizontal(|ui| {
+                    ui.label("Kata Kunci Jendela Game:");
+                    let prof = st.store.active_profile_mut();
+                    ui.add(
+                        egui::TextEdit::singleline(&mut prof.window_keyword)
+                            .hint_text("misal: valorant, cs2, cyberpunk")
+                            .desired_width(180.0),
+                    );
+
+                    ui.separator();
+                    ui.add(
+                        egui::TextEdit::singleline(&mut self.new_profile_name)
+                            .hint_text("Nama profil baru...")
+                            .desired_width(130.0),
+                    );
+                    if ui.button("➕ Buat Profil").clicked() {
+                        let trimmed = self.new_profile_name.trim().to_string();
+                        if !trimmed.is_empty() && !st.store.profiles.contains_key(&trimmed) {
+                            let mut cloned = st.store.active_profile().clone();
+                            cloned.name = trimmed.clone();
+                            cloned.window_keyword = trimmed.to_lowercase();
+                            st.store.profiles.insert(trimmed.clone(), cloned);
+                            st.store.active_profile_name = trimmed.clone();
+                            st.bindings_dirty = true;
+                            self.new_profile_name.clear();
+                            st.status_message = format!("Profil '{}' dibuat!", trimmed);
+                        }
+                    }
+                });
+
+                ui.horizontal(|ui| {
+                    ui.small(format!("Jendela Fokus: {}", st.active_window_title));
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.small(egui::RichText::new(&st.status_message).color(egui::Color32::LIGHT_GREEN));
+                    });
+                });
+            });
+
+            ui.add_space(4.0);
 
             // Navigasi Tab
             ui.horizontal(|ui| {
@@ -132,151 +212,152 @@ impl eframe::App for MapperGuiApp {
 
 impl MapperGuiApp {
     fn render_stick_and_gyro(&self, ui: &mut egui::Ui, st: &mut SharedState) {
-        ui.columns(2, |columns| {
-            // KOLOM KIRI: Analog Stick & Kurva
-            columns.heading("Analog Stick & Response Curve");
-            columns.add_space(6.0);
+        let raw_left = st.raw_left;
+        let processed_left = st.processed_left;
+        let gyro_calibrated = st.gyro_calibrated;
+        let mut trigger_recal = false;
 
-            columns.add(
-                egui::Slider::new(&mut st.stick_cfg.inner_deadzone, 0.0..=0.45)
-                    .text("Inner Deadzone"),
-            );
-            columns.add(
-                egui::Slider::new(&mut st.stick_cfg.outer_deadzone, 0.60..=1.0)
-                    .text("Outer Deadzone"),
-            );
-            columns.add(
-                egui::Slider::new(&mut st.stick_cfg.curve_exponent, 0.5..=3.0)
-                    .text("Kurva Eksponen (1.0 = Linear)"),
-            );
+        {
+            let prof = st.store.active_profile_mut();
 
-            columns.add_space(12.0);
-            columns.label("Grafik Response Curve (Input vs Output):");
+            ui.columns(2, |columns| {
+                // KOLOM KIRI: Analog Stick & Kurva
+                columns.heading("Analog Stick & Response Curve");
+                columns.add_space(6.0);
 
-            let (response, painter) =
-                columns.allocate_painter(egui::Vec2::new(220.0, 220.0), egui::Sense::hover());
-            let rect = response.rect;
-            painter.rect_filled(rect, 4.0, egui::Color32::from_gray(25));
-            painter.rect_stroke(rect, 4.0, egui::Stroke::new(1.0, egui::Color32::GRAY));
+                columns.add(
+                    egui::Slider::new(&mut prof.stick_cfg.inner_deadzone, 0.0..=0.45)
+                        .text("Inner Deadzone"),
+                );
+                columns.add(
+                    egui::Slider::new(&mut prof.stick_cfg.outer_deadzone, 0.60..=1.0)
+                        .text("Outer Deadzone"),
+                );
+                columns.add(
+                    egui::Slider::new(&mut prof.stick_cfg.curve_exponent, 0.5..=3.0)
+                        .text("Kurva Eksponen (1.0 = Linear)"),
+                );
 
-            painter.line_segment(
-                [rect.left_bottom(), rect.right_top()],
-                egui::Stroke::new(1.0, egui::Color32::from_gray(70)),
-            );
+                columns.add_space(12.0);
+                columns.label("Grafik Response Curve (Input vs Output):");
 
-            let steps = 50;
-            let mut points = Vec::with_capacity(steps + 1);
-            for i in 0..=steps {
-                let input_x = (i as f32) / (steps as f32);
-                let out = process_stick(input_x, 0.0, &st.stick_cfg).x;
-                let px = rect.left() + input_x * rect.width();
-                let py = rect.bottom() - out * rect.height();
-                points.push(egui::Pos2::new(px, py));
-            }
-            painter.add(egui::Shape::line(
-                points,
-                egui::Stroke::new(2.5, egui::Color32::from_rgb(0, 190, 255)),
-            ));
+                let (response, painter) =
+                    columns.allocate_painter(egui::Vec2::new(210.0, 210.0), egui::Sense::hover());
+                let rect = response.rect;
+                painter.rect_filled(rect, 4.0, egui::Color32::from_gray(25));
+                painter.rect_stroke(rect, 4.0, egui::Stroke::new(1.0, egui::Color32::GRAY));
 
-            // KOLOM KANAN: Gyro & Visualizer
-            columns.heading("Gyro & Motion Control (1€ Filter)");
-            columns.add_space(6.0);
+                painter.line_segment(
+                    [rect.left_bottom(), rect.right_top()],
+                    egui::Stroke::new(1.0, egui::Color32::from_gray(70)),
+                );
 
-            let cal_status = if st.gyro_calibrated {
-                "Terkalibrasi (Siap)"
-            } else {
-                "Mengkalibrasi (Diamkan kontroler...)"
-            };
-            columns.label(format!("Status Gyro: {}", cal_status));
-            if columns.button("Kalibrasi Ulang Gyro").clicked() {
-                st.recalibrate_gyro = true;
-            }
-
-            columns.add_space(6.0);
-            columns.add(
-                egui::Slider::new(&mut st.gyro_cfg.sensitivity_x, 1.0..=50.0)
-                    .text("Sensitivitas X"),
-            );
-            columns.add(
-                egui::Slider::new(&mut st.gyro_cfg.sensitivity_y, 1.0..=50.0)
-                    .text("Sensitivitas Y"),
-            );
-            columns.add(
-                egui::Slider::new(&mut st.gyro_cfg.min_cutoff, 0.1..=3.0)
-                    .text("Smoothing (Min Cutoff)"),
-            );
-            columns.add(
-                egui::Slider::new(&mut st.gyro_cfg.beta, 0.0..=0.15).text("Kecepatan (Beta)"),
-            );
-            columns.checkbox(&mut st.gyro_cfg.invert_y, "Invert Sumbu Y");
-
-            columns.add_space(12.0);
-            columns.label("Live Stick Visualizer (Merah = Raw, Hijau = Output):");
-
-            let (stick_resp, stick_painter) =
-                columns.allocate_painter(egui::Vec2::new(150.0, 150.0), egui::Sense::hover());
-            let s_rect = stick_resp.rect;
-            let center = s_rect.center();
-            let radius = s_rect.width() * 0.45;
-
-            stick_painter.circle_stroke(
-                center,
-                radius,
-                egui::Stroke::new(1.5, egui::Color32::GRAY),
-            );
-            stick_painter.circle_stroke(
-                center,
-                radius * st.stick_cfg.inner_deadzone,
-                egui::Stroke::new(1.0, egui::Color32::from_rgb(255, 100, 100)),
-            );
-
-            let raw_pos =
-                center + egui::Vec2::new(st.raw_left.x * radius, -st.raw_left.y * radius);
-            stick_painter.circle_filled(raw_pos, 4.0, egui::Color32::RED);
-
-            let proc_pos = center
-                + egui::Vec2::new(st.processed_left.x * radius, -st.processed_left.y * radius);
-            stick_painter.circle_filled(proc_pos, 5.0, egui::Color32::GREEN);
-        });
-    }
-
-    fn render_button_bindings(&mut self, ui: &mut egui::Ui, st: &mut SharedState) {
-        ui.heading("Tambah Pemetaan Baru");
-        ui.add_space(4.0);
-
-        ui.group(|ui| {
-            ui.horizontal(|ui| {
-                ui.label("Tombol Fisik:");
-                egui::ComboBox::from_id_salt("combo_trigger")
-                    .selected_text(button_label(self.new_trigger))
-                    .show_ui(ui, |ui| {
-                        for &btn in &ALL_BUTTONS {
-                            ui.selectable_value(&mut self.new_trigger, btn, button_label(btn));
-                        }
-                    });
-
-                ui.label("-> Aksi Game:");
-                egui::ComboBox::from_id_salt("combo_action")
-                    .selected_text(action_label(&self.new_action))
-                    .show_ui(ui, |ui| {
-                        for act in &ALL_ACTIONS {
-                            ui.selectable_value(
-                                &mut self.new_action,
-                                act.clone(),
-                                action_label(act),
-                            );
-                        }
-                    });
-            });
-
-            ui.add_space(6.0);
-
-            ui.horizontal(|ui| {
-                ui.label("Jenis Aktivator:");
-                ui.selectable_value(
-                    &mut self.new_activator_kind,
-                    ActivatorKind::Regular,
-                    "Regular Press",);
+                let steps = 50;
+                let mut points = Vec::with_capacity(steps + 1);
+                for i in 0..=steps {
+                    let input_x = (i as f32) / (steps as f32);
+                    let out = process_stick(input_x, 0.0, &prof.stick_cfg).x;
+                    let px = rect.left() + input_x * rect.width();
+                    let py = rect.bottom() - out * rect.height();
+points.push(egui::Pos2::new(px, py));
+}
+painter.add(egui::Shape::line(
+points,
+egui::Stroke::new(2.5, egui::Color32::from_rgb(0, 190, 255)),
+));
+// KOLOM KANAN: Gyro & Visualizer
+columns.heading("Gyro & Motion Control (1€ Filter)");
+columns.add_space(6.0);
+let cal_status = if gyro_calibrated {
+"Terkalibrasi (Siap)"
+} else {
+"Mengkalibrasi (Diamkan kontroler...)"
+};
+columns.label(format!("Status Gyro: {}", cal_status));
+if columns.button("Kalibrasi Ulang Gyro").clicked() {
+trigger_recal = true;
+}
+columns.add_space(6.0);
+columns.add(
+egui::Slider::new(&mut prof.gyro_cfg.sensitivity_x, 1.0..=50.0)
+.text("Sensitivitas X"),
+);
+columns.add(
+egui::Slider::new(&mut prof.gyro_cfg.sensitivity_y, 1.0..=50.0)
+.text("Sensitivitas Y"),
+);
+columns.add(
+egui::Slider::new(&mut prof.gyro_cfg.min_cutoff, 0.1..=3.0)
+.text("Smoothing (Min Cutoff)"),
+);
+columns.add(
+egui::Slider::new(&mut prof.gyro_cfg.beta, 0.0..=0.15).text("Kecepatan (Beta)"),
+);
+columns.checkbox(&mut prof.gyro_cfg.invert_y, "Invert Sumbu Y");
+columns.add_space(12.0);
+columns.label("Live Stick Visualizer (Merah = Raw, Hijau = Output):");
+let (stick_resp, stick_painter) =
+columns.allocate_painter(egui::Vec2::new(140.0, 140.0), egui::Sense::hover());
+let s_rect = stick_resp.rect;
+let center = s_rect.center();
+let radius = s_rect.width() * 0.45;
+stick_painter.circle_stroke(
+center,
+radius,
+egui::Stroke::new(1.5, egui::Color32::GRAY),
+);
+stick_painter.circle_stroke(
+center,
+radius * prof.stick_cfg.inner_deadzone,
+egui::Stroke::new(1.0, egui::Color32::from_rgb(255, 100, 100)),
+);
+let raw_pos =
+center + egui::Vec2::new(raw_left.x * radius, -raw_left.y * radius);
+stick_painter.circle_filled(raw_pos, 4.0, egui::Color32::RED);
+let proc_pos = center
++ egui::Vec2::new(processed_left.x * radius, -processed_left.y * radius);
+stick_painter.circle_filled(proc_pos, 5.0, egui::Color32::GREEN);
+});
+}
+if trigger_recal {
+st.recalibrate_gyro = true;
+}
+}
+fn render_button_bindings(&mut self, ui: &mut egui::Ui, st: &mut SharedState) {
+ui.heading("Tambah Pemetaan Baru");
+ui.add_space(4.0);
+let mut added_binding: Option = None;
+ui.group(|ui| {
+ui.horizontal(|ui| {
+ui.label("Tombol Fisik:");
+egui::ComboBox::from_id_salt("combo_trigger")
+.selected_text(button_label(self.new_trigger))
+.show_ui(ui, |ui| {
+for &btn in &ALL_BUTTONS {
+ui.selectable_value(&mut self.new_trigger, btn, button_label(btn));
+}
+});
+ui.label("-> Aksi Game:");
+egui::ComboBox::from_id_salt("combo_action")
+.selected_text(action_label(&self.new_action))
+.show_ui(ui, |ui| {
+for act in &ALL_ACTIONS {
+ui.selectable_value(
+&mut self.new_action,
+act.clone(),
+action_label(act),
+);
+}
+});
+});
+ui.add_space(6.0);
+ui.horizontal(|ui| {
+ui.label("Jenis Aktivator:");
+ui.selectable_value(
+&mut self.new_activator_kind,
+ActivatorKind::Regular,
+"Regular Press",
+);
 ui.selectable_value(
 &mut self.new_activator_kind,
 ActivatorKind::LongPress,
@@ -293,7 +374,6 @@ ActivatorKind::Chord,
 "Chord (Kombinasi)",
 );
 });
-// Parameter tambahan sesuai jenis aktivator yang dipilih
 match self.new_activator_kind {
 ActivatorKind::Regular => {}
 ActivatorKind::LongPress | ActivatorKind::DoubleTap => {
@@ -333,20 +413,24 @@ ActivatorKind::Chord => ActivatorType::Chord {
 modifier: self.new_chord_modifier,
 },
 };
-st.bindings.push(ActionBinding {
+added_binding = Some(ActionBinding {
 trigger: self.new_trigger,
 activator,
 action: self.new_action.clone(),
 });
-st.bindings_dirty = true;
 }
 });
+if let Some(b) = added_binding {
+st.store.active_profile_mut().bindings.push(b);
+st.bindings_dirty = true;
+}
 ui.add_space(12.0);
 ui.heading("Daftar Pemetaan Aktif");
 ui.add_space(4.0);
 let mut index_to_remove: Option = None;
 egui::ScrollArea::vertical().show(ui, |ui| {
-for (idx, binding) in st.bindings.iter().enumerate() {
+let bindings = &st.store.active_profile().bindings;
+for (idx, binding) in bindings.iter().enumerate() {
 ui.horizontal(|ui| {
 let act_desc = match &binding.activator {
 ActivatorType::RegularPress => "Regular Press".to_string(),
@@ -374,7 +458,7 @@ ui.separator();
 }
 });
 if let Some(idx) = index_to_remove {
-st.bindings.remove(idx);
+st.store.active_profile_mut().bindings.remove(idx);
 st.bindings_dirty = true;
 }
 }
@@ -383,7 +467,7 @@ fn main() -> eframe::Result<()> {
 let shared_state = Arc::new(Mutex::new(SharedState::default()));
 spawn_mapper_thread(Arc::clone(&shared_state));
 let options = eframe::NativeOptions {
-viewport: egui::ViewportBuilder::default().with_inner_size([720.0, 480.0]),
+viewport: egui::ViewportBuilder::default().with_inner_size([740.0, 540.0]),
 ..Default::default()
 };
 eframe::run_native(
