@@ -245,11 +245,12 @@ mod tests {
         assert!(max_jitter_out < 0.005, "max_jitter_out was {}", max_jitter_out);
 
         let mut last_out = 0.0;
-        // Simulasi gerakan menoleh cepat (5.0 rad/s)
-        for _ in 0..50 {
-            last_out = filter.filter(5.0, dt);
+        // Simulasi gerakan menoleh cepat secara progresif (0.0 -> 5.0 rad/s)
+        for i in 1..=50 {
+            let ramp = (i as f32 / 50.0) * 5.0;
+            last_out = filter.filter(ramp, dt);
         }
         // Filter harus cepat mengejar nilai target tanpa lag berat
-        assert!(last_out > 4.5);
+        assert!(last_out > 4.5, "last_out was {}", last_out);
     }
 }
