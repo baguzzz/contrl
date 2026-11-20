@@ -10,7 +10,7 @@ eframe = "0.29"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 active-win-pos-rs = "0.8"
-sdl3 = { version = "0.14", features = ["build-from-source"] }
+sdl2 = { version = "0.37", features = ["bundled", "static-link"] }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 vigem-client = "0.1"

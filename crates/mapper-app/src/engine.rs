@@ -1,11 +1,11 @@
 use crate::output::{create_platform_output, OutputState};
 use crate::profiles::ProfileStore;
 use glam::{Vec2, Vec3};
-use mapper_core::actions::{ActionEngine, ActionSet};
+use mapper_core::actions::{ActionEngine, ActionSet, PhysicalButton};
 use mapper_core::gyro::GyroProcessor;
 use mapper_core::process_stick;
-use sdl3::gamepad::{Axis, Button};
-use sdl3::sensor::SensorType;
+use sdl2::controller::{Axis, Button};
+use sdl2::sensor::SensorType;
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -42,13 +42,12 @@ impl Default for SharedState {
     }
 }
 
-fn map_sdl_button(btn: Button) -> Option<mapper_core::actions::PhysicalButton> {
-    use mapper_core::actions::PhysicalButton;
+fn map_sdl_button(btn: Button) -> Option<PhysicalButton> {
     match btn {
-        Button::South => Some(PhysicalButton::South),
-        Button::East => Some(PhysicalButton::East),
-        Button::West => Some(PhysicalButton::West),
-        Button::North => Some(PhysicalButton::North),
+        Button::A => Some(PhysicalButton::South),
+        Button::B => Some(PhysicalButton::East),
+        Button::X => Some(PhysicalButton::West),
+        Button::Y => Some(PhysicalButton::North),
         Button::LeftShoulder => Some(PhysicalButton::LeftBumper),
         Button::RightShoulder => Some(PhysicalButton::RightBumper),
         _ => None,
@@ -68,7 +67,6 @@ pub fn spawn_mapper_thread(shared: Arc<Mutex<SharedState>>) {
                 st.active_window_title = format!("{} ({})", win.app_name, win.title);
 
                 if st.auto_switch_enabled {
-                    // Cari profil dengan window_keyword yang cocok
                     let matched_name = st
                         .store
                         .profiles
@@ -94,14 +92,18 @@ pub fn spawn_mapper_thread(shared: Arc<Mutex<SharedState>>) {
 
     // Thread 2: Polling Loop Kontroler 500Hz
     std::thread::spawn(move || {
-        let sdl = match sdl3::init() {
+        // Aktifkan dukungan sensor Gyro Bluetooth untuk kontroler PlayStation & Switch
+        sdl2::hint::set("SDL_JOYSTICK_HIDAPI_PS4_RUMBLE", "1");
+        sdl2::hint::set("SDL_JOYSTICK_HIDAPI_PS5_RUMBLE", "1");
+
+        let sdl = match sdl2::init() {
             Ok(s) => s,
             Err(e) => {
-                eprintln!("Gagal inisialisasi SDL3: {e}");
+                eprintln!("Gagal inisialisasi SDL2: {e}");
                 return;
             }
         };
-        let gamepad_sys = sdl.gamepad().unwrap();
+        let controller_sys = sdl.game_controller().unwrap();
         let mut event_pump = sdl.event_pump().unwrap();
 
         let (initial_gyro_cfg, initial_bindings) = {
@@ -120,7 +122,7 @@ pub fn spawn_mapper_thread(shared: Arc<Mutex<SharedState>>) {
         let mut action_engine = ActionEngine::new(default_set);
         let mut virtual_out = create_platform_output();
 
-        let mut active_gamepad: Option<sdl3::gamepad::Gamepad> = None;
+        let mut active_controller: Option<sdl2::controller::GameController> = None;
         let mut pressed_buttons = HashSet::new();
         let mut raw_left_stick = Vec2::ZERO;
         let mut raw_right_stick = Vec2::ZERO;
@@ -135,38 +137,38 @@ pub fn spawn_mapper_thread(shared: Arc<Mutex<SharedState>>) {
             last_tick = now;
 
             for event in event_pump.poll_iter() {
-                use sdl3::event::Event;
+                use sdl2::event::Event;
                 match event {
-                    Event::GamepadAdded { which } => {
-                        if let Ok(mut gp) = gamepad_sys.open(which) {
-                            let name = gp.name().unwrap_or_else(|_| "Unknown Gamepad".into());
-                            if gp.has_sensor(SensorType::Gyro) {
-                                let _ = gp.set_sensor_enabled(SensorType::Gyro, true);
+                    Event::ControllerDeviceAdded { which, .. } => {
+                        if let Ok(gp) = controller_sys.open(which) {
+                            let name = gp.name();
+                            if gp.has_sensor(SensorType::Gyroscope) {
+                                let _ = gp.sensor_set_enabled(SensorType::Gyroscope, true);
                                 gyro_processor.calibrator.reset();
                             }
                             if let Ok(mut st) = shared.lock() {
                                 st.controller_name = name;
                             }
-                            active_gamepad = Some(gp);
+                            active_controller = Some(gp);
                         }
                     }
-                    Event::GamepadRemoved { .. } => {
-                        active_gamepad = None;
+                    Event::ControllerDeviceRemoved { .. } => {
+                        active_controller = None;
                         if let Ok(mut st) = shared.lock() {
                             st.controller_name = "Kontroler terputus".to_string();
                         }
                     }
-                    Event::GamepadButtonDown { button, .. } => {
+                    Event::ControllerButtonDown { button, .. } => {
                         if let Some(pb) = map_sdl_button(button) {
                             pressed_buttons.insert(pb);
                         }
                     }
-                    Event::GamepadButtonUp { button, .. } => {
+                    Event::ControllerButtonUp { button, .. } => {
                         if let Some(pb) = map_sdl_button(button) {
                             pressed_buttons.remove(&pb);
                         }
                     }
-                    Event::GamepadAxisMotion { axis, value, .. } => {
+                    Event::ControllerAxisMotion { axis, value, .. } => {
                         let norm = (value as f32) / 32768.0;
                         match axis {
                             Axis::LeftX => raw_left_stick.x = norm,
@@ -176,8 +178,8 @@ pub fn spawn_mapper_thread(shared: Arc<Mutex<SharedState>>) {
                             _ => {}
                         }
                     }
-                    Event::GamepadSensorUpdate { sensor, data, .. } => {
-                        if sensor == SensorType::Gyro && data.len() >= 3 {
+                    Event::ControllerSensorUpdated { sensor, data, .. } => {
+                        if sensor == SensorType::Gyroscope {
                             latest_gyro = Vec3::new(data, data, data);
                         }
                     }
@@ -214,7 +216,7 @@ pub fn spawn_mapper_thread(shared: Arc<Mutex<SharedState>>) {
                 }
             }
 
-            if active_gamepad.is_some() {
+            if active_controller.is_some() {
                 let processed_l = process_stick(raw_left_stick.x, raw_left_stick.y, &stick_cfg);
                 let processed_r = process_stick(raw_right_stick.x, raw_right_stick.y, &stick_cfg);
                 let gyro_delta = gyro_processor.process(latest_gyro, dt);
@@ -229,18 +231,16 @@ pub fn spawn_mapper_thread(shared: Arc<Mutex<SharedState>>) {
                     gyro_mouse_delta: gyro_delta,
                     actions: triggered_actions,
                 });
-
-                if let Ok(mut st) = shared.lock() {
-                    st.raw_left = raw_left_stick;
-                    st.processed_left = processed_l;
-                    st.gyro_calibrated = gyro_processor.calibrator.is_calibrated;
-                }
-            }
-
-            let elapsed = now.elapsed();
-            if elapsed < target_frame_time {
-                std::thread::sleep(target_frame_time - elapsed);
-            }
-        }
-    });
+if let Ok(mut st) = shared.lock() {
+st.raw_left = raw_left_stick;
+st.processed_left = processed_l;
+st.gyro_calibrated = gyro_processor.calibrator.is_calibrated;
+}
+}
+let elapsed = now.elapsed();
+if elapsed < target_frame_time {
+std::thread::sleep(target_frame_time - elapsed);
+}
+}
+});
 }
