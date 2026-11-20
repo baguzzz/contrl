@@ -1,3 +1,4 @@
+pub mod gyro;
 use glam::Vec2;
 
 pub struct StickConfig {
