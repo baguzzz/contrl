@@ -1,0 +1,14 @@
+{
+  "name": "Rust Input Mapper Dev",
+  "image": "://microsoft.com",
+  "postCreateCommand": "sudo apt-get update && sudo apt-get install -y libudev-dev libusb-1.0-0-dev pkg-config libxkbcommon-dev cmake",
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "rust-lang.rust-analyzer",
+        "tamasfe.even-better-toml",
+        "github.vscode-github-actions"
+      ]
+    }
+  }
+}
