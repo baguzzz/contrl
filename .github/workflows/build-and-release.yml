@@ -4,6 +4,10 @@ on:
   push:
     branches: [ main ]
 
+env:
+  CARGO_TERM_COLOR: always
+  CMAKE_POLICY_VERSION_MINIMUM: "3.5"
+
 jobs:
   test-core:
     runs-on: ubuntu-latest
