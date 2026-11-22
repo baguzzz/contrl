@@ -1,61 +1,52 @@
-name: Build & Test Controller Mapper
+name: Build Windows Controller Mapper
 
 on:
   push:
-    branches: [ main ]
+    branches: [main]
   pull_request:
-    branches: [ main ]
+    branches: [main]
 
 env:
   CARGO_TERM_COLOR: always
-  CMAKE_POLICY_VERSION_MINIMUM: "3.5"
-  # Menghindari error C23 (keyword 'false') pada GCC 15 saat mengompilasi sdl2-sys di Linux
-  CFLAGS: "-std=gnu17"
+  CARGO_INCREMENTAL: 0
 
 jobs:
   test-core:
-    runs-on: ubuntu-latest
+    runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
+
       - uses: dtolnay/rust-toolchain@stable
         with:
-          components: clippy, rustfmt
+          components: rustfmt, clippy
+
       - uses: Swatinem/rust-cache@v2
-      - name: Install Linux Deps
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y cmake ninja-build libudev-dev libusb-1.0-0-dev pkg-config \
-            libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev libxkbcommon-dev libgtk-3-dev
-      - run: cargo test -p mapper-core
-      
-  build-binaries:
+        with:
+          workspaces: .
+
+      - name: Test core
+        run: cargo test -p mapper-core
+
+  build-windows:
     needs: test-core
-    strategy:
-      matrix:
-        include:
-          - os: windows-latest
-            target: x86_64-pc-windows-msvc
-            artifact_name: input-mapper-windows.exe
-            bin_path: target/x86_64-pc-windows-msvc/release/mapper-app.exe
-          - os: ubuntu-latest
-            target: x86_64-unknown-linux-gnu
-            artifact_name: input-mapper-linux
-            bin_path: target/x86_64-unknown-linux-gnu/release/mapper-app
-    runs-on: ${{ matrix.os }}
+    runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
+
       - uses: dtolnay/rust-toolchain@stable
         with:
-          targets: ${{ matrix.target }}
+          targets: x86_64-pc-windows-msvc
+          components: rustfmt, clippy
+
       - uses: Swatinem/rust-cache@v2
-      - name: Install Linux Deps
-        if: runner.os == 'Linux'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y cmake ninja-build libudev-dev libusb-1.0-0-dev pkg-config \
-            libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev libxkbcommon-dev libgtk-3-dev
-      - run: cargo build --release --target ${{ matrix.target }} -p mapper-app
-      - uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.artifact_name }}
-          path: ${{ matrix.bin_path }}
+          workspaces: .
+
+      - name: Build Windows release
+        run: cargo build --release --target x86_64-pc-windows-msvc -p mapper-app
+
+      - name: Upload Windows executable
+        uses: actions/upload-artifact@v4
+        with:
+          name: input-mapper-windows
+          path: target/x86_64-pc-windows-msvc/release/mapper-app.exe
