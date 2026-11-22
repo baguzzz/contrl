@@ -13,5 +13,4 @@ active-win-pos-rs = "0.8"
 sdl2 = { workspace = true }
 
 [target.'cfg(windows)'.dependencies]
-vigem-client = "0.5"
 windows-sys = "0.59"
