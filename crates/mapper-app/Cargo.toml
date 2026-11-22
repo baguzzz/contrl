@@ -1,3 +1,8 @@
+[package]
+name = "mapper-app"
+version = "0.1.0"
+edition = "2021"
+
 [dependencies]
 mapper-core = { path = "../mapper-core" }
 glam = "0.29"
